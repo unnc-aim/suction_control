@@ -23,7 +23,7 @@ namespace suction_control
 
         rc_topic_ = this->declare_parameter<std::string>("rc_topic", "/sbus/read");
         serial_port_ = this->declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
-        channel7_index_ = this->declare_parameter<int>("channel7_index", 6); // 通道7 (索引为6)
+        channel7_index_ = this->declare_parameter<int>("channel7_index", 7); // 通道7 (索引为6)
         suck_threshold_ = this->declare_parameter<int>("suck_threshold", 1300);
 
 
