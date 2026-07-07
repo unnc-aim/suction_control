@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <termios.h>
 
-#include "r2_suction_control.h"
+#include "suction_control.h"
 
 namespace suction_control
 {
@@ -23,8 +23,8 @@ namespace suction_control
 
         rc_topic_ = this->declare_parameter<std::string>("rc_topic", "/sbus/read");
         serial_port_ = this->declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
-        channel7_index_ = this->declare_parameter<int>("channel7_index", 6); // 通道7 (索引为6)
-        suck_threshold_ = this->declare_parameter<int>("suck_threshold", 1300);
+        channel_index_ = this->declare_parameter<int>("channel_index", 7); // 监听通道索引
+        suck_threshold_ = this->declare_parameter<int>("suck_threshold", 1300); // channel value 触发阈值，大于这个值触发打开吸盘泵
 
 
         init_relay();
@@ -116,17 +116,17 @@ namespace suction_control
 
     void R2SuctionControlNode::on_rc_read(const custom_msgs::msg::ReadSBUSRC::SharedPtr msg)
     {
-        if (channel7_index_ < 0 || static_cast<std::size_t>(channel7_index_) >= msg->channels.size())
+        if (channel_index_ < 0 || static_cast<std::size_t>(channel_index_) >= msg->channels.size())
         {
             return;
         }
 
-        const uint16_t ch7 = msg->channels[static_cast<std::size_t>(channel7_index_)];
+        const uint16_t ch = msg->channels[static_cast<std::size_t>(channel_index_)];
 
-        RCLCPP_INFO(this->get_logger(), "CH7 raw value: %d", ch7);
+        RCLCPP_INFO(this->get_logger(), "CH raw value: %d", ch);
 
         // 手动边缘触发逻辑
-        if (ch7 >= static_cast<uint16_t>(suck_threshold_))
+        if (ch >= static_cast<uint16_t>(suck_threshold_))
         {
             if (!target_suck_)
             {

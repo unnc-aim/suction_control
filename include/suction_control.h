@@ -2,8 +2,8 @@
 // Created by zihao on 2026/6/11.
 //
 
-#ifndef R2_SUCTION_CONTROL_R2_SUCTION_CONTROL_H
-#define R2_SUCTION_CONTROL_R2_SUCTION_CONTROL_H
+#ifndef SUCTION_CONTROL_SUCTION_CONTROL_H
+#define SUCTION_CONTROL_SUCTION_CONTROL_H
 
 #include <string>
 #include <memory>
@@ -31,7 +31,7 @@ namespace suction_control
 
         std::string rc_topic_;
         std::string serial_port_;
-        int channel7_index_;
+        int channel_index_;
         int suck_threshold_;
 
         bool target_suck_;
@@ -44,4 +44,4 @@ namespace suction_control
     };
 }
 
-#endif //R2_SUCTION_CONTROL_R2_SUCTION_CONTROL_H
+#endif //SUCTION_CONTROL_SUCTION_CONTROL_H
