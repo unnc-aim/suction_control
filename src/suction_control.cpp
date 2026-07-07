@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <termios.h>
 
-#include "r2_suction_control.h"
+#include "suction_control.h"
 
 namespace suction_control
 {

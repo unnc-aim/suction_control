@@ -19,8 +19,8 @@ include_directories(include)
 
 
 #add executable
-add_executable(r2_suction_control src/r2_suction_control.cpp)
-ament_target_dependencies(r2_suction_control
+add_executable(suction_control src/suction_control.cpp)
+ament_target_dependencies(suction_control
         rclcpp
         std_msgs
         custom_msgs
@@ -28,7 +28,13 @@ ament_target_dependencies(r2_suction_control
 
 
 #insatll
-install(TARGETS r2_suction_control DESTINATION lib/${PROJECT_NAME})
+install(TARGETS suction_control DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY
+  config
+  launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
