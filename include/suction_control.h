@@ -31,7 +31,7 @@ namespace suction_control
 
         std::string rc_topic_;
         std::string serial_port_;
-        int channel7_index_;
+        int channel_index_;
         int suck_threshold_;
 
         bool target_suck_;
