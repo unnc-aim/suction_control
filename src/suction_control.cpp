@@ -17,6 +17,8 @@ namespace suction_control
     R2SuctionControlNode::R2SuctionControlNode(const rclcpp::NodeOptions& options) :
             Node("suction_control", options),
             target_suck_(false),
+            has_prev_rc_(false),
+            prev_above_threshold_(false),
             relay_fd_(-1) // 初始化串口为未打开状态 (-1)
     {
         RCLCPP_INFO(this->get_logger(), "Initializing r2 suction control");
@@ -36,6 +38,11 @@ namespace suction_control
         auto_suck_sub_ = this->create_subscription<std_msgs::msg::Bool>(
                 "/cmd_suction_suck", 10,
                 std::bind(&R2SuctionControlNode::on_auto_suck_trigger, this, std::placeholders::_1));
+
+        set_suction_srv_ = this->create_service<suction_control::srv::SetSuction>(
+                "set_suction",
+                std::bind(&R2SuctionControlNode::on_set_suction, this,
+                          std::placeholders::_1, std::placeholders::_2));
 
         RCLCPP_INFO(this->get_logger(), "====== [Phase 3: Hardware Integration] Node Started Successfully! ======");
     }
@@ -114,6 +121,23 @@ namespace suction_control
     }
 
 
+    // 统一的吸盘状态设置入口：更新目标状态并驱动硬件，返回是否成功写入
+    bool R2SuctionControlNode::apply_suck(bool suck)
+    {
+        if (relay_fd_ < 0)
+        {
+            RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 5000,
+                    "Serial port is not open. Cannot control valves!");
+            return false;
+        }
+
+        target_suck_ = suck;
+        set_valve(suck);
+        return true;
+    }
+
+
     void R2SuctionControlNode::on_rc_read(const custom_msgs::msg::ReadSBUSRC::SharedPtr msg)
     {
         if (channel_index_ < 0 || static_cast<std::size_t>(channel_index_) >= msg->channels.size())
@@ -125,41 +149,48 @@ namespace suction_control
 
         RCLCPP_INFO(this->get_logger(), "CH raw value: %d", ch);
 
-        // 手动边缘触发逻辑
-        if (ch >= static_cast<uint16_t>(suck_threshold_))
+        // 手动跳变切换逻辑：每次从阈值的一边跳变到另一边时，翻转一次吸盘状态
+        // 为了防止和topic冲突，这里维护一下channel的状态，这样可以同时兼容service和 sbus channel 两者同时存在
+        const bool above = (ch >= static_cast<uint16_t>(suck_threshold_));
+
+        // 首帧仅记录初始侧，不触发切换
+        if (!has_prev_rc_)
         {
-            if (!target_suck_)
-            {
-                target_suck_ = true;
-                RCLCPP_INFO(this->get_logger(), "MANUAL TRIGGER: -> [Suction Cup ON]");
-
-
-                set_valve(true);
-            }
+            has_prev_rc_ = true;
+            prev_above_threshold_ = above;
+            return;
         }
-        else
+
+        // 仅当跨越阈值（侧别发生变化）时才翻转
+        if (above != prev_above_threshold_)
         {
-            if (target_suck_)
-            {
-                target_suck_ = false;
-                RCLCPP_INFO(this->get_logger(), "MANUAL TRIGGER: -> [Suction Cup OFF]");
-
-
-                set_valve(false);
-            }
+            prev_above_threshold_ = above;
+            const bool new_suck = !target_suck_;
+            RCLCPP_INFO(this->get_logger(), "MANUAL TOGGLE (crossed threshold -> %s): -> [Suction Cup %s]",
+                        above ? "above" : "below", new_suck ? "ON" : "OFF");
+            apply_suck(new_suck);
         }
     }
 
     void R2SuctionControlNode::on_auto_suck_trigger(const std_msgs::msg::Bool::SharedPtr msg)
     {
+        RCLCPP_INFO(this->get_logger(), "AUTO TRIGGER: -> [Suction Cup %s]", msg->data ? "ON" : "OFF");
+        apply_suck(msg->data);
+    }
 
-        if (!target_suck_)
-        {
-            RCLCPP_INFO(this->get_logger(), "AUTO TRIGGER: -> [Suction Cup %s]", msg->data ? "ON" : "OFF");
+    void R2SuctionControlNode::on_set_suction(
+            const suction_control::srv::SetSuction::Request::SharedPtr req,
+            suction_control::srv::SetSuction::Response::SharedPtr res)
+    {
+        const bool ok = apply_suck(req->suck);
+        res->success = ok;
+        res->current_suck = target_suck_;
+        res->message = ok
+                       ? (req->suck ? std::string("Suction cup turned ON") : std::string("Suction cup turned OFF"))
+                       : std::string("Failed: serial port is not open");
 
-
-            set_valve(msg->data);
-        }
+        RCLCPP_INFO(this->get_logger(), "SERVICE TRIGGER (set_suction): suck=%d -> success=%d, current=%d",
+                    static_cast<int>(req->suck), static_cast<int>(ok), static_cast<int>(target_suck_));
     }
 } // namespace suction_control
 

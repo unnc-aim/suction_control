@@ -1,0 +1,11 @@
+# 控制吸盘泵/阀门
+# true  = 开启吸盘（吸）
+# false = 关闭吸盘（放）
+bool suck
+---
+# 是否成功执行（串口已打开并写入）
+bool success
+# 描述性信息（失败原因等）
+string message
+# 执行后吸盘当前的实际目标状态
+bool current_suck

@@ -13,22 +13,32 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(custom_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
 #include hpp (before exe)
 include_directories(include)
 
 
+# 生成服务接口 SetSuction.srv
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/SetSuction.srv"
+)
+
 #add executable
-add_executable(suction_control src/suction_control.cpp)
-ament_target_dependencies(suction_control
+add_executable(suction_control_node src/suction_control.cpp)
+ament_target_dependencies(suction_control_node
         rclcpp
         std_msgs
         custom_msgs
 )
 
+# 链接本包生成的 srv 类型支持（SetSuction）
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(suction_control_node "${cpp_typesupport_target}")
+
 
 #insatll
-install(TARGETS suction_control DESTINATION lib/${PROJECT_NAME})
+install(TARGETS suction_control_node DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY
   config

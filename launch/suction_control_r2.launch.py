@@ -13,7 +13,7 @@ def generate_launch_description():
 
     suction_control_node = Node(
         package='suction_control',
-        executable='suction_control',
+        executable='suction_control_node',
         name='suction_control',
         output='screen',
         parameters=[config_file]
