@@ -61,11 +61,26 @@ namespace suction_control
     // 初始化
     void R2SuctionControlNode::init_relay()
     {
+        // 启动时尽力打开一次；失败不致命——apply_suck 会在收到指令时懒加载重试，
+        // 以应对 USB 设备在节点启动之后才枚举出来的时序竞争。
+        try_open_relay();
+    }
+
+    bool R2SuctionControlNode::try_open_relay()
+    {
+        if (relay_fd_ >= 0)
+        {
+            return true; // 已打开
+        }
+
         relay_fd_ = open(serial_port_.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
         if (relay_fd_ < 0)
         {
-            RCLCPP_ERROR(this->get_logger(), "Failed to open serial port %s!", serial_port_.c_str());
-            return;
+            RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 5000,
+                    "Failed to open serial port %s! (will retry on next request)",
+                    serial_port_.c_str());
+            return false;
         }
 
         // 配置波特率为 9600，无校验，8位数据位，1位停止位
@@ -81,6 +96,7 @@ namespace suction_control
         tcsetattr(relay_fd_, TCSANOW, &options);
 
         RCLCPP_INFO(this->get_logger(), "Serial port %s opened successfully.", serial_port_.c_str());
+        return true;
     }
 
 
@@ -126,10 +142,11 @@ namespace suction_control
     {
         if (relay_fd_ < 0)
         {
-            RCLCPP_WARN_THROTTLE(
-                    this->get_logger(), *this->get_clock(), 5000,
-                    "Serial port is not open. Cannot control valves!");
-            return false;
+            // 懒加载重试：串口未打开（如启动时设备尚未枚举）则在收到指令时再尝试打开
+            if (!try_open_relay())
+            {
+                return false;
+            }
         }
 
         target_suck_ = suck;

@@ -24,7 +24,8 @@ namespace suction_control
 
     private:
 
-        void init_relay();
+        void init_relay();         // 启动时尽力打开一次串口（失败不致命）
+        bool try_open_relay();     // 串口未打开时尝试（重新）打开并配置；已打开返回 true
 
         // 写串口继电器
         void set_valve(bool suck);
