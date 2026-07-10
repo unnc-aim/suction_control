@@ -147,7 +147,7 @@ namespace suction_control
 
         const uint16_t ch = msg->channels[static_cast<std::size_t>(channel_index_)];
 
-        RCLCPP_INFO(this->get_logger(), "CH raw value: %d", ch);
+        // RCLCPP_INFO(this->get_logger(), "CH %d raw value: %d", channel_index_, ch);
 
         // 手动跳变切换逻辑：每次从阈值的一边跳变到另一边时，翻转一次吸盘状态
         // 为了防止和topic冲突，这里维护一下channel的状态，这样可以同时兼容service和 sbus channel 两者同时存在
