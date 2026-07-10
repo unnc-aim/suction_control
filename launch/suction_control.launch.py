@@ -8,7 +8,7 @@ def generate_launch_description():
     config_file = os.path.join(
         get_package_share_directory('suction_control'),
         'config',
-        'suction_control_r2.yaml'
+        'suction_control.yaml'
     )
 
     suction_control_node = Node(

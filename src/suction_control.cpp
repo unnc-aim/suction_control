@@ -3,7 +3,12 @@
 //
 
 #include <cstddef>
+#include <filesystem>
+#include <sstream>
 #include <sys/types.h>
+#include <vector>
+
+#include <algorithm>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -14,9 +19,132 @@
 namespace suction_control
 {
 
+    std::vector<std::string> R2SuctionControlNode::scan_serial_ports() const
+    {
+        std::vector<std::string> ports;
+        constexpr const char* kDevPath = "/dev";
+
+        try
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(kDevPath))
+            {
+                if (!entry.is_character_file())
+                {
+                    continue;
+                }
+
+                const std::string name = entry.path().filename().string();
+                if (name.rfind("ttyUSB", 0) == 0 || name.rfind("ttyACM", 0) == 0)
+                {
+                    ports.emplace_back(entry.path().string());
+                }
+            }
+        }
+        catch (const std::exception& e)
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to scan serial ports: %s", e.what());
+        }
+
+        std::sort(ports.begin(), ports.end());
+        return ports;
+    }
+
+    void R2SuctionControlNode::close_relay()
+    {
+        if (relay_fd_ >= 0)
+        {
+            close(relay_fd_);
+            relay_fd_ = -1;
+        }
+    }
+
+    void R2SuctionControlNode::refresh_serial_port_by_diff()
+    {
+        const auto current_ports = scan_serial_ports();
+        std::vector<std::string> added_ports;
+        std::vector<std::string> removed_ports;
+
+        for (const auto& p : current_ports)
+        {
+            if (std::find(last_serial_ports_.begin(), last_serial_ports_.end(), p) == last_serial_ports_.end())
+            {
+                added_ports.push_back(p);
+            }
+        }
+        for (const auto& p : last_serial_ports_)
+        {
+            if (std::find(current_ports.begin(), current_ports.end(), p) == current_ports.end())
+            {
+                removed_ports.push_back(p);
+            }
+        }
+
+        if (!added_ports.empty() || !removed_ports.empty())
+        {
+            std::ostringstream oss;
+            oss << "Serial diff detected.";
+            if (!added_ports.empty())
+            {
+                oss << " added:";
+                for (const auto& p : added_ports)
+                {
+                    oss << " " << p;
+                }
+            }
+            if (!removed_ports.empty())
+            {
+                oss << " removed:";
+                for (const auto& p : removed_ports)
+                {
+                    oss << " " << p;
+                }
+            }
+            RCLCPP_INFO(this->get_logger(), "%s", oss.str().c_str());
+        }
+
+        std::string selected_port = serial_port_;
+        const bool current_port_exists =
+                std::find(current_ports.begin(), current_ports.end(), serial_port_) != current_ports.end();
+
+        if (!current_port_exists && relay_fd_ >= 0)
+        {
+            RCLCPP_WARN(this->get_logger(), "Current serial port %s disappeared, closing stale fd.", serial_port_.c_str());
+            close_relay();
+        }
+
+        if (!added_ports.empty())
+        {
+            selected_port = added_ports.front();
+        }
+        else if (!current_ports.empty() && !current_port_exists)
+        {
+            selected_port = current_ports.front();
+        }
+
+        if (selected_port != serial_port_)
+        {
+            RCLCPP_WARN(
+                    this->get_logger(),
+                    "Serial port switched from %s to %s due to port drift.",
+                    serial_port_.c_str(), selected_port.c_str());
+            serial_port_ = selected_port;
+            close_relay();
+        }
+
+        last_serial_ports_ = current_ports;
+
+        if (relay_fd_ < 0)
+        {
+            init_relay();
+        }
+    }
+
     R2SuctionControlNode::R2SuctionControlNode(const rclcpp::NodeOptions& options) :
             Node("suction_control", options),
             target_suck_(false),
+            estop_active_(false),
+            manual_ch_high_initialized_(false),
+            manual_ch_high_(false),
             relay_fd_(-1) // 初始化串口为未打开状态 (-1)
     {
         RCLCPP_INFO(this->get_logger(), "Initializing r2 suction control");
@@ -24,10 +152,12 @@ namespace suction_control
         rc_topic_ = this->declare_parameter<std::string>("rc_topic", "/sbus/read");
         serial_port_ = this->declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
         channel_index_ = this->declare_parameter<int>("channel_index", 7); // 监听通道索引
+        estop_channel_index_ = this->declare_parameter<int>("estop_channel_index", 4); // 急停监听通道索引（默认CH4）
         suck_threshold_ = this->declare_parameter<int>("suck_threshold", 1300); // channel value 触发阈值，大于这个值触发打开吸盘泵
 
 
         init_relay();
+    last_serial_ports_ = scan_serial_ports();
 
         rc_sub_ = this->create_subscription<custom_msgs::msg::ReadSBUSRC>(
                 rc_topic_, rclcpp::SensorDataQoS(),
@@ -46,7 +176,7 @@ namespace suction_control
         if (relay_fd_ >= 0)
         {
             set_valve(false);
-            close(relay_fd_);
+            close_relay();
             RCLCPP_INFO(this->get_logger(), "Successfully closed serial port: %s", serial_port_.c_str());
         }
     }
@@ -79,6 +209,8 @@ namespace suction_control
 
     void R2SuctionControlNode::set_valve(bool suck)
     {
+        refresh_serial_port_by_diff();
+
         if (relay_fd_ < 0)
         {
             RCLCPP_WARN_THROTTLE(
@@ -121,43 +253,83 @@ namespace suction_control
             return;
         }
 
-        const uint16_t ch = msg->channels[static_cast<std::size_t>(channel_index_)];
-
-        RCLCPP_INFO(this->get_logger(), "CH raw value: %d", ch);
-
-        // 手动边缘触发逻辑
-        if (ch >= static_cast<uint16_t>(suck_threshold_))
+        if (estop_channel_index_ >= 0 && static_cast<std::size_t>(estop_channel_index_) < msg->channels.size())
         {
-            if (!target_suck_)
+            const uint16_t estop_ch = msg->channels[static_cast<std::size_t>(estop_channel_index_)];
+            const bool estop_now = estop_ch >= static_cast<uint16_t>(suck_threshold_);
+
+            if (estop_now)
             {
-                target_suck_ = true;
-                RCLCPP_INFO(this->get_logger(), "MANUAL TRIGGER: -> [Suction Cup ON]");
+                if (!estop_active_)
+                {
+                    RCLCPP_WARN(this->get_logger(), "E-STOP ACTIVE (CH4 high): immediate shutdown.");
+                }
+                estop_active_ = true;
 
+                if (target_suck_)
+                {
+                    target_suck_ = false;
+                }
 
-                set_valve(true);
+                // 急停优先级最高，高值时立即关闭并阻断后续控制
+                set_valve(false);
+                return;
             }
+
+            if (estop_active_)
+            {
+                RCLCPP_INFO(this->get_logger(), "E-STOP RELEASED (CH4 low): control restored.");
+            }
+            estop_active_ = false;
         }
-        else
+
+        const uint16_t ch = msg->channels[static_cast<std::size_t>(channel_index_)];
+        const bool manual_high = ch >= static_cast<uint16_t>(suck_threshold_);
+
+        if (!manual_ch_high_initialized_)
+        {
+            manual_ch_high_initialized_ = true;
+            manual_ch_high_ = manual_high;
+            return;
+        }
+
+        // 严格边沿触发：上升沿(低->高)关闭，下降沿(高->低)打开
+        if (!manual_ch_high_ && manual_high)
         {
             if (target_suck_)
             {
                 target_suck_ = false;
-                RCLCPP_INFO(this->get_logger(), "MANUAL TRIGGER: -> [Suction Cup OFF]");
-
-
+                RCLCPP_INFO(this->get_logger(), "MANUAL EDGE(RISING): -> [Suction Cup OFF]");
                 set_valve(false);
             }
         }
+        else if (manual_ch_high_ && !manual_high)
+        {
+            if (!target_suck_)
+            {
+                target_suck_ = true;
+                RCLCPP_INFO(this->get_logger(), "MANUAL EDGE(FALLING): -> [Suction Cup ON]");
+                set_valve(true);
+            }
+        }
+
+        manual_ch_high_ = manual_high;
     }
 
     void R2SuctionControlNode::on_auto_suck_trigger(const std_msgs::msg::Bool::SharedPtr msg)
     {
+        if (estop_active_)
+        {
+            RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "AUTO TRIGGER ignored: E-STOP is active.");
+            return;
+        }
 
-        if (!target_suck_)
+        if (target_suck_ != msg->data)
         {
             RCLCPP_INFO(this->get_logger(), "AUTO TRIGGER: -> [Suction Cup %s]", msg->data ? "ON" : "OFF");
-
-
+            target_suck_ = msg->data;
             set_valve(msg->data);
         }
     }

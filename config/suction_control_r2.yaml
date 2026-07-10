@@ -1,6 +1,0 @@
-suction_control:
-  ros__parameters:
-    rc_topic: "/sbus/read"
-    serial_port: "/dev/ttyUSB0"
-    channel_index: 6
-    suck_threshold: 1300
