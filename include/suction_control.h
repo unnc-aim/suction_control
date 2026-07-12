@@ -5,8 +5,10 @@
 #ifndef SUCTION_CONTROL_SUCTION_CONTROL_H
 #define SUCTION_CONTROL_SUCTION_CONTROL_H
 
+#include <filesystem>
 #include <string>
 #include <memory>
+#include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -24,11 +26,14 @@ namespace suction_control
 
     private:
 
+        std::vector<std::string> discover_serial_ports() const;
+        bool open_serial_port(const std::string & serial_port);
+
         void init_relay();         // 启动时尽力打开一次串口（失败不致命）
         bool try_open_relay();     // 串口未打开时尝试（重新）打开并配置；已打开返回 true
 
         // 写串口继电器
-        void set_valve(bool suck);
+        bool set_valve(bool suck);
 
         // 统一的吸盘状态设置入口：更新 target_suck_ 并驱动阀门
         bool apply_suck(bool suck);

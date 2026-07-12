@@ -2,7 +2,9 @@
 // Created by zihao on 2026/6/11.
 //
 
+#include <algorithm>
 #include <cstddef>
+#include <filesystem>
 #include <sys/types.h>
 
 #include <fcntl.h>
@@ -14,6 +16,18 @@
 namespace suction_control
 {
 
+    namespace fs = std::filesystem;
+
+    namespace
+    {
+
+        bool has_prefix(const std::string & value, const std::string & prefix)
+        {
+            return value.rfind(prefix, 0U) == 0U;
+        }
+
+    }
+
     R2SuctionControlNode::R2SuctionControlNode(const rclcpp::NodeOptions& options) :
             Node("suction_control", options),
             target_suck_(false),
@@ -24,7 +38,7 @@ namespace suction_control
         RCLCPP_INFO(this->get_logger(), "Initializing r2 suction control");
 
         rc_topic_ = this->declare_parameter<std::string>("rc_topic", "/sbus/read");
-        serial_port_ = this->declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
+        serial_port_ = this->declare_parameter<std::string>("serial_port", "auto");
         channel_index_ = this->declare_parameter<int>("channel_index", 7); // 监听通道索引
         suck_threshold_ = this->declare_parameter<int>("suck_threshold", 1300); // channel value 触发阈值，大于这个值触发打开吸盘泵
 
@@ -40,7 +54,7 @@ namespace suction_control
                 std::bind(&R2SuctionControlNode::on_auto_suck_trigger, this, std::placeholders::_1));
 
         set_suction_srv_ = this->create_service<suction_control::srv::SetSuction>(
-                "set_suction",
+            "/set_suction",
                 std::bind(&R2SuctionControlNode::on_set_suction, this,
                           std::placeholders::_1, std::placeholders::_2));
 
@@ -66,26 +80,76 @@ namespace suction_control
         try_open_relay();
     }
 
-    bool R2SuctionControlNode::try_open_relay()
+    std::vector<std::string> R2SuctionControlNode::discover_serial_ports() const
     {
-        if (relay_fd_ >= 0)
-        {
-            return true; // 已打开
+        std::vector<std::string> candidates;
+        auto add_candidate = [&candidates](const std::string & candidate) {
+            if (candidate.empty()) {
+                return;
+            }
+            if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end()) {
+                candidates.push_back(candidate);
+            }
+        };
+
+        if (!serial_port_.empty() && (serial_port_ != "auto")) {
+            add_candidate(serial_port_);
         }
 
-        relay_fd_ = open(serial_port_.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
-        if (relay_fd_ < 0)
-        {
-            RCLCPP_WARN_THROTTLE(
-                    this->get_logger(), *this->get_clock(), 5000,
-                    "Failed to open serial port %s! (will retry on next request)",
-                    serial_port_.c_str());
+        std::error_code ec;
+        const fs::path by_id_dir("/dev/serial/by-id");
+        if (fs::exists(by_id_dir, ec) && fs::is_directory(by_id_dir, ec)) {
+            std::vector<std::string> by_id_candidates;
+            for (const auto & entry : fs::directory_iterator(by_id_dir, ec)) {
+                if (!entry.is_symlink()) {
+                    continue;
+                }
+
+                by_id_candidates.push_back(entry.path().string());
+            }
+            std::sort(by_id_candidates.begin(), by_id_candidates.end());
+            for (const auto & candidate : by_id_candidates) {
+                add_candidate(candidate);
+            }
+        }
+
+        const fs::path dev_dir("/dev");
+        if (fs::exists(dev_dir, ec) && fs::is_directory(dev_dir, ec)) {
+            std::vector<std::string> tty_candidates;
+            for (const auto & entry : fs::directory_iterator(dev_dir, ec)) {
+                if (!entry.is_character_file() && !entry.is_symlink()) {
+                    continue;
+                }
+
+                const std::string name = entry.path().filename().string();
+                if (has_prefix(name, "ttyUSB") || has_prefix(name, "ttyACM") ||
+                    has_prefix(name, "ttyS") || has_prefix(name, "ttyAMA") ||
+                    has_prefix(name, "rfcomm")) {
+                    tty_candidates.push_back(entry.path().string());
+                }
+            }
+            std::sort(tty_candidates.begin(), tty_candidates.end());
+            for (const auto & candidate : tty_candidates) {
+                add_candidate(candidate);
+            }
+        }
+
+        return candidates;
+    }
+
+    bool R2SuctionControlNode::open_serial_port(const std::string & serial_port)
+    {
+        const int fd = open(serial_port.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
+        if (fd < 0) {
             return false;
         }
 
-        // 配置波特率为 9600，无校验，8位数据位，1位停止位
         struct termios options;
-        tcgetattr(relay_fd_, &options);
+        if (tcgetattr(fd, &options) != 0) {
+            close(fd);
+            return false;
+        }
+
         cfsetispeed(&options, B9600);
         cfsetospeed(&options, B9600);
         options.c_cflag |= (CLOCAL | CREAD);
@@ -93,46 +157,103 @@ namespace suction_control
         options.c_cflag |= CS8;
         options.c_cflag &= ~PARENB;
         options.c_cflag &= ~CSTOPB;
-        tcsetattr(relay_fd_, TCSANOW, &options);
+        if (tcsetattr(fd, TCSANOW, &options) != 0) {
+            close(fd);
+            return false;
+        }
 
+        relay_fd_ = fd;
+        serial_port_ = serial_port;
         RCLCPP_INFO(this->get_logger(), "Serial port %s opened successfully.", serial_port_.c_str());
         return true;
     }
 
+    bool R2SuctionControlNode::try_open_relay()
+    {
+        if (relay_fd_ >= 0)
+        {
+            return true; // 已打开
+        }
 
-    void R2SuctionControlNode::set_valve(bool suck)
+        const auto candidates = discover_serial_ports();
+        if (candidates.empty()) {
+            RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 5000,
+                    "No serial candidates found while searching for suction control.");
+            return false;
+        }
+
+        for (const auto & candidate : candidates) {
+            RCLCPP_INFO(this->get_logger(), "Trying serial candidate: %s", candidate.c_str());
+            if (open_serial_port(candidate)) {
+                return true;
+            }
+        }
+
+        RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 5000,
+                "Failed to open any serial candidate for suction control. Will retry on next request.");
+        return false;
+    }
+
+
+    bool R2SuctionControlNode::set_valve(bool suck)
     {
         if (relay_fd_ < 0)
         {
             RCLCPP_WARN_THROTTLE(
                     this->get_logger(), *this->get_clock(), 5000,
                     "Serial port is not open. Cannot control valves!");
-            return;
+            return false;
         }
 
         if (suck)
         {
             // 第一路打开指令：A0 01 01 A2
             uint8_t open_ch1[] = {0xA0, 0x01, 0x01, 0xA2};
-            write(relay_fd_, open_ch1, sizeof(open_ch1));
+            const ssize_t written_ch1 = write(relay_fd_, open_ch1, sizeof(open_ch1));
 
             // 第二路瞬间打开指令：A0 02 01 A3
             uint8_t open_ch2[] = {0xA0, 0x02, 0x01, 0xA3};
-            write(relay_fd_, open_ch2, sizeof(open_ch2));
+            const ssize_t written_ch2 = write(relay_fd_, open_ch2, sizeof(open_ch2));
+
+            if ((written_ch1 != static_cast<ssize_t>(sizeof(open_ch1))) ||
+                (written_ch2 != static_cast<ssize_t>(sizeof(open_ch2)))) {
+                RCLCPP_WARN(
+                        this->get_logger(),
+                        "Failed to write suction ON command to %s, reopening on next request.",
+                        serial_port_.c_str());
+                close(relay_fd_);
+                relay_fd_ = -1;
+                return false;
+            }
 
             RCLCPP_DEBUG(this->get_logger(), "Hardware: Both channels triggered ON.");
+            return true;
         }
         else
         {
             // 第一路关闭指令：A0 01 00 A1
             uint8_t close_ch1[] = {0xA0, 0x01, 0x00, 0xA1};
-            write(relay_fd_, close_ch1, sizeof(close_ch1));
+            const ssize_t written_ch1 = write(relay_fd_, close_ch1, sizeof(close_ch1));
 
             // 第二路瞬间关闭指令：A0 02 00 A2
             uint8_t close_ch2[] = {0xA0, 0x02, 0x00, 0xA2};
-            write(relay_fd_, close_ch2, sizeof(close_ch2));
+            const ssize_t written_ch2 = write(relay_fd_, close_ch2, sizeof(close_ch2));
+
+            if ((written_ch1 != static_cast<ssize_t>(sizeof(close_ch1))) ||
+                (written_ch2 != static_cast<ssize_t>(sizeof(close_ch2)))) {
+                RCLCPP_WARN(
+                        this->get_logger(),
+                        "Failed to write suction OFF command to %s, reopening on next request.",
+                        serial_port_.c_str());
+                close(relay_fd_);
+                relay_fd_ = -1;
+                return false;
+            }
 
             RCLCPP_DEBUG(this->get_logger(), "Hardware: Both channels triggered OFF.");
+            return true;
         }
     }
 
@@ -150,8 +271,7 @@ namespace suction_control
         }
 
         target_suck_ = suck;
-        set_valve(suck);
-        return true;
+        return set_valve(suck);
     }
 
 
