@@ -266,12 +266,24 @@ namespace suction_control
             // 懒加载重试：串口未打开（如启动时设备尚未枚举）则在收到指令时再尝试打开
             if (!try_open_relay())
             {
+                RCLCPP_WARN(this->get_logger(),
+                            "apply_suck(%s) skipped: relay is unavailable.",
+                            suck ? "ON" : "OFF");
                 return false;
             }
         }
 
-        target_suck_ = suck;
-        return set_valve(suck);
+        const bool ok = set_valve(suck);
+        if (ok)
+        {
+            target_suck_ = suck;
+            return true;
+        }
+
+        RCLCPP_WARN(this->get_logger(),
+                    "apply_suck(%s) failed: keep previous target state [%s].",
+                    suck ? "ON" : "OFF", target_suck_ ? "ON" : "OFF");
+        return false;
     }
 
 
@@ -298,14 +310,19 @@ namespace suction_control
             return;
         }
 
-        // 仅当跨越阈值（侧别发生变化）时才翻转
+        // 仅当跨越阈值（侧别发生变化）时才应用。
+        // 语义保持与参数说明一致：高于阈值 -> ON，低于阈值 -> OFF。
         if (above != prev_above_threshold_)
         {
             prev_above_threshold_ = above;
-            const bool new_suck = !target_suck_;
-            RCLCPP_INFO(this->get_logger(), "MANUAL TOGGLE (crossed threshold -> %s): -> [Suction Cup %s]",
-                        above ? "above" : "below", new_suck ? "ON" : "OFF");
-            apply_suck(new_suck);
+            const bool new_suck = above;
+            const bool ok = apply_suck(new_suck);
+            RCLCPP_INFO(this->get_logger(),
+                        "MANUAL SET (crossed threshold -> %s): request=[%s], applied=%d, current=[%s]",
+                        above ? "above" : "below",
+                        new_suck ? "ON" : "OFF",
+                        static_cast<int>(ok),
+                        target_suck_ ? "ON" : "OFF");
         }
     }
 
