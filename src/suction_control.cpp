@@ -38,6 +38,8 @@ namespace suction_control
         RCLCPP_INFO(this->get_logger(), "Initializing r2 suction control");
 
         rc_topic_ = this->declare_parameter<std::string>("rc_topic", "/sbus/read");
+        // 指定具体串口路径时为「严格模式」：只使用该串口，打不开就在调用时告警且不做回退；
+        // 设为 "auto" 或留空时为「自动模式」，沿用原有的 /dev 候选扫描发现逻辑。
         serial_port_ = this->declare_parameter<std::string>("serial_port", "auto");
         channel_index_ = this->declare_parameter<int>("channel_index", 7); // 监听通道索引
         suck_threshold_ = this->declare_parameter<int>("suck_threshold", 1300); // channel value 触发阈值，大于这个值触发打开吸盘泵
@@ -175,6 +177,26 @@ namespace suction_control
             return true; // 已打开
         }
 
+        // 严格模式：当显式指定了具体串口路径（serial_port != "auto" 且非空）时，
+        // 只使用该串口，绝不回退扫描，避免配置的设备临时失联时误抓到其他串口
+        // （例如 /dev/ttyS0 这类与吸盘继电器无关的 UART）。
+        const bool strict_port = !serial_port_.empty() && (serial_port_ != "auto");
+        if (strict_port)
+        {
+            RCLCPP_INFO(this->get_logger(), "Trying configured serial port: %s", serial_port_.c_str());
+            if (open_serial_port(serial_port_))
+            {
+                return true;
+            }
+            RCLCPP_WARN(
+                    this->get_logger(),
+                    "Configured serial port '%s' not found / not in effect; "
+                    "suction commands will be ignored until it becomes available.",
+                    serial_port_.c_str());
+            return false;
+        }
+
+        // 自动模式：未指定具体串口时，沿用原有的候选扫描发现逻辑
         const auto candidates = discover_serial_ports();
         if (candidates.empty()) {
             RCLCPP_WARN_THROTTLE(
@@ -266,9 +288,6 @@ namespace suction_control
             // 懒加载重试：串口未打开（如启动时设备尚未枚举）则在收到指令时再尝试打开
             if (!try_open_relay())
             {
-                RCLCPP_WARN(this->get_logger(),
-                            "apply_suck(%s) skipped: relay is unavailable.",
-                            suck ? "ON" : "OFF");
                 return false;
             }
         }
@@ -277,13 +296,8 @@ namespace suction_control
         if (ok)
         {
             target_suck_ = suck;
-            return true;
         }
-
-        RCLCPP_WARN(this->get_logger(),
-                    "apply_suck(%s) failed: keep previous target state [%s].",
-                    suck ? "ON" : "OFF", target_suck_ ? "ON" : "OFF");
-        return false;
+        return ok;
     }
 
 
@@ -315,14 +329,7 @@ namespace suction_control
         if (above != prev_above_threshold_)
         {
             prev_above_threshold_ = above;
-            const bool new_suck = above;
-            const bool ok = apply_suck(new_suck);
-            RCLCPP_INFO(this->get_logger(),
-                        "MANUAL SET (crossed threshold -> %s): request=[%s], applied=%d, current=[%s]",
-                        above ? "above" : "below",
-                        new_suck ? "ON" : "OFF",
-                        static_cast<int>(ok),
-                        target_suck_ ? "ON" : "OFF");
+            apply_suck(above);
         }
     }
 

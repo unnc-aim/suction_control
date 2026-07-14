@@ -1,6 +1,9 @@
 suction_control:
   ros__parameters:
     rc_topic: "/sbus/read"
+    # R2 uses this specific CH340 USB-serial relay. Setting a concrete path (not "auto")
+    # enables strict mode: only this port is used; if it can't be opened the node warns
+    # and does NOT fall back to scanning (prevents accidentally grabbing /dev/ttyS0).
     serial_port: "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
     channel_index: 6
     suck_threshold: 1300
